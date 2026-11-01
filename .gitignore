@@ -1,0 +1,14 @@
+config.py
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.backup
+*.bak*
+backups/
+*.log
+venv/
+__pycache__/
+*.py[cod]
+.env
+*.env
