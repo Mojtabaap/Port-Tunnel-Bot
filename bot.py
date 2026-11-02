@@ -1,13 +1,15 @@
 import json
+import html
 import asyncio, json, logging, re, uuid, ipaddress
 from datetime import datetime
 import aiohttp
 import aiosqlite
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, BotCommand
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, BotCommand
 from aiogram.filters import StateFilter
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
+from aiogram.dispatcher.event.bases import SkipHandler
 from urllib.parse import urlparse
 import time
 from aiogram.fsm.state import State, StatesGroup
@@ -19,7 +21,11 @@ DB = DATABASE_PATH
 dp = Dispatcher()
 
 class Buy(StatesGroup):
+    name = State()
     dest_ip = State()
+
+class SupportFlow(StatesGroup):
+    message = State()
 
 class TestFlow(StatesGroup):
     dest_ip = State()
@@ -55,6 +61,7 @@ class AdminFlow(StatesGroup):
     debit_user = State()
     debit_amount = State()
     edit_button_label = State()
+    send_user_message = State()
 
 def is_admin(uid): return uid == ADMIN_ID
 def money(n): return f"{int(n):,} تومان"
@@ -108,6 +115,10 @@ async def init_db():
         user_columns = [row[1] for row in await cur.fetchall()]
         if "blocked" not in user_columns:
             await c.execute("ALTER TABLE users ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0")
+        if "full_name" not in user_columns:
+            await c.execute("ALTER TABLE users ADD COLUMN full_name TEXT")
+        if "username" not in user_columns:
+            await c.execute("ALTER TABLE users ADD COLUMN username TEXT")
         cur = await c.execute("SELECT COUNT(*) FROM payment_methods")
         if (await cur.fetchone())[0] == 0:
             cur = await c.execute("SELECT value FROM settings WHERE key='card'")
@@ -145,14 +156,43 @@ async def user_reply_kb():
         [KeyboardButton(text=labels["services"])],
         [KeyboardButton(text=labels["topup"]), KeyboardButton(text=labels["balance"])],
         [KeyboardButton(text=labels["usage"])],
+        [KeyboardButton(text="تماس با پشتیبانی💬")],
     ], resize_keyboard=True, is_persistent=True, input_field_placeholder="یک گزینه از منو انتخاب کنید…")
+
+
+ADMIN_BUTTONS = [
+    "➕ افزودن سرور", "📡 لیست سرورها", "💳 روش‌های پرداخت",
+    "⚠️ هشدار موجودی", "🧾 رسیدهای در انتظار", "👥 کاربران ربات",
+    "🎨 ویرایش دکمه‌های کاربر", "➕ شارژ دستی", "➖ کسر موجودی",
+    "🏠 بازگشت به فروشگاه"
+]
+
+def admin_reply_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="➕ افزودن سرور"), KeyboardButton(text="📡 لیست سرورها")],
+            [KeyboardButton(text="💳 روش‌های پرداخت"), KeyboardButton(text="🧾 رسیدهای در انتظار")],
+            [KeyboardButton(text="👥 کاربران ربات"), KeyboardButton(text="⚠️ هشدار موجودی")],
+            [KeyboardButton(text="🎨 ویرایش دکمه‌های کاربر")],
+            [KeyboardButton(text="➕ شارژ دستی"), KeyboardButton(text="➖ کسر موجودی")],
+            [KeyboardButton(text="🏠 بازگشت به فروشگاه")]
+        ],
+        resize_keyboard=True, is_persistent=True,
+        input_field_placeholder="عملیات مدیریت را انتخاب کنید…"
+    )
 
 class BlockedUserMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         user = getattr(event, "from_user", None)
         if user and not is_admin(user.id):
             async with db() as c:
+                # Keep Telegram display names current for the admin's paginated user list.
+                await c.execute(
+                    "UPDATE users SET full_name=?, username=? WHERE id=?",
+                    (user.full_name, user.username, user.id)
+                )
                 row = await (await c.execute("SELECT blocked FROM users WHERE id=?", (user.id,))).fetchone()
+                await c.commit()
             if row and row[0]:
                 if isinstance(event, CallbackQuery):
                     await event.answer("⛔️ دسترسی شما مسدود شده است.", show_alert=True)
@@ -194,22 +234,30 @@ def admin_back_kb():
         [InlineKeyboardButton(text="🔙 بازگشت به پنل مدیریت", callback_data="admin_home")]
     ])
 
+
+
 @dp.message(CommandStart())
 async def start(m: Message, state: FSMContext):
     # /start always exits an unfinished flow, so the user is never trapped in a prompt.
     await state.clear()
     is_new = await ensure_user(m.from_user.id)
+    async with db() as c:
+        await c.execute("UPDATE users SET full_name=?, username=? WHERE id=?",
+                        (m.from_user.full_name, m.from_user.username, m.from_user.id))
+        await c.commit()
     if is_new:
         u = m.from_user
         try:
-            await m.bot.send_message(ADMIN_ID,
-                "🆕 <b>کاربر جدید وارد ربات شد</b>\\n"
-                f"🆔 شناسه: <code>{u.id}</code>\\n"
-                f"👤 نام: {u.full_name}\\n"
-                f"🔗 نام کاربری: @{u.username}" if u.username else
-                "🆕 <b>کاربر جدید وارد ربات شد</b>\\n"
-                f"🆔 شناسه: <code>{u.id}</code>\\n👤 نام: {u.full_name}",
-                parse_mode="HTML")
+            username = f"@{html.escape(u.username)}" if u.username else "ندارد"
+            await m.bot.send_message(
+                ADMIN_ID,
+                "🟢 <b>کاربر جدید وارد ربات شد.</b>\n"
+                "➖➖➖➖➖➖➖➖\n"
+                f"🧍🏻نام : {html.escape(u.full_name)}\n"
+                f"🗨️آی دی : <code>{u.id}</code>\n"
+                f"⚜️یوزرنیم : {username}",
+                parse_mode="HTML"
+            )
         except Exception:
             logging.exception("new user notification failed")
     await m.answer("✨ <b>به سامانه خدمات تانل خوش آمدید</b>\n\nاز منوی پایین، بخش موردنظر را انتخاب کنید.", reply_markup=await user_reply_kb(), parse_mode="HTML")
@@ -218,33 +266,38 @@ async def start(m: Message, state: FSMContext):
 async def cancel_command(m: Message, state: FSMContext):
     await state.clear()
     if is_admin(m.from_user.id):
-        return await m.answer("🛠 عملیات لغو شد.", reply_markup=admin_kb())
+        return await m.answer("🛠 عملیات لغو شد.", reply_markup=admin_reply_kb())
     await m.answer("🏪 عملیات لغو شد. به منوی اصلی برگشتید.", reply_markup=await user_reply_kb())
 
 @dp.message(Command("admin"))
 async def admin(m: Message, state: FSMContext):
     if not is_admin(m.from_user.id): return await m.answer("⛔️ دسترسی ندارید.")
     await state.clear()
-    await m.answer("🛠 پنل مدیریت", reply_markup=admin_kb())
+    await m.answer("🛠 پنل مدیریت فعال شد. از دکمه‌های پایین استفاده کنید.", reply_markup=admin_reply_kb())
 @dp.callback_query(F.data=="back_shop")
 async def back_shop(q: CallbackQuery):
-    await edit_or_send(q, 
-        "🏪 به فروشگاه خوش آمدید.",
-        reply_markup=main_kb()
-    )
+    try:
+        await q.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await q.message.answer("🏪 به فروشگاه برگشتید.", reply_markup=await user_reply_kb())
     await q.answer()
 @dp.callback_query(F.data == "admin_home")
 async def admin_home(q: CallbackQuery, state: FSMContext):
     if not is_admin(q.from_user.id):
         return await q.answer("⛔️ دسترسی ندارید.", show_alert=True)
     await state.clear()
-    await edit_or_send(q, "🛠 پنل مدیریت", reply_markup=admin_kb())
+    await q.message.answer("🛠 پنل مدیریت فعال شد.", reply_markup=admin_reply_kb())
     await q.answer()
 
 @dp.callback_query(F.data == "cancel_user_flow")
 async def cancel_user_flow(q: CallbackQuery, state: FSMContext):
     await state.clear()
-    await edit_or_send(q, "🏪 عملیات لغو شد. به منوی اصلی برگشتید.", reply_markup=main_kb())
+    try:
+        await q.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await q.message.answer("🏪 عملیات لغو شد. به منوی اصلی برگشتید.", reply_markup=await user_reply_kb())
     await q.answer("عملیات لغو شد.")
 
 @dp.callback_query(F.data == "cancel_admin_flow")
@@ -252,7 +305,11 @@ async def cancel_admin_flow(q: CallbackQuery, state: FSMContext):
     if not is_admin(q.from_user.id):
         return await q.answer("⛔️ دسترسی ندارید.", show_alert=True)
     await state.clear()
-    await edit_or_send(q, "🛠 عملیات لغو شد. پنل مدیریت", reply_markup=admin_kb())
+    try:
+        await q.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await q.message.answer("🛠 عملیات لغو شد. پنل مدیریت", reply_markup=admin_reply_kb())
     await q.answer("عملیات لغو شد.")
 
 @dp.callback_query(F.data=="balance")
@@ -288,20 +345,127 @@ async def buy(q: CallbackQuery):
     if not rows:
         await edit_or_send(q, "فعلاً هیچ پلن فعالی وجود ندارد.")
     else:
-        kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{r[1]} | ساخت {money(r[2])} | هر گیگ {money(r[3])}",callback_data=f"choose:{r[0]}")] for r in rows])
-        await edit_or_send(q, "پلن موردنظر را انتخاب کنید:",reply_markup=kb)
+        kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=str(r[1]),callback_data=f"choose:{r[0]}")] for r in rows])
+        await edit_or_send(q, "🛒 لطفاً پنل مقصد را انتخاب کنید:",reply_markup=kb)
     await q.answer()
 
 @dp.callback_query(F.data.startswith("choose:"))
 async def choose(q: CallbackQuery,state:FSMContext):
     sid=int(q.data.split(":")[1])
     async with db() as c:
-        row=await (await c.execute("SELECT id,name,create_price FROM servers WHERE id=? AND active=1",(sid,))).fetchone()
-    if not row: return await q.answer("پلن در دسترس نیست.",show_alert=True)
-    await state.update_data(server_id=sid,create_price=row[2])
-    await state.set_state(Buy.dest_ip)
-    await edit_or_send(q, "🌐 IP مقصد را وارد کنید؛ پورت به‌صورت خودکار و یکتا انتخاب می‌شود:", reply_markup=flow_cancel_kb())
+        row=await (await c.execute("SELECT id,name,create_price,gb_price FROM servers WHERE id=? AND active=1",(sid,))).fetchone()
+    if not row: return await q.answer("پنل در دسترس نیست.",show_alert=True)
+    await state.update_data(server_id=sid, panel_name=row[1], create_price=row[2], gb_price=row[3])
+    await state.set_state(Buy.name)
+    await edit_or_send(q, "🧍🏻لطفاً یک نام کاربری برای تانل خود وارد کنید:", reply_markup=flow_cancel_kb())
     await q.answer()
+
+@dp.message(Buy.name)
+async def buy_name(m: Message, state: FSMContext):
+    service_name = (m.text or "").strip()
+    if not service_name or len(service_name) > 40:
+        return await m.answer("❌ نام باید بین ۱ تا ۴۰ نویسه باشد. دوباره وارد کنید:", reply_markup=flow_cancel_kb())
+    await state.update_data(service_label=service_name)
+    d = await state.get_data()
+    description = (
+        f"🔰پنل مقصد : {html.escape(str(d['panel_name']))}\n"
+        f"🪙هزینه ساخت پنل : {money(d['create_price'])}\n"
+        f"💵قیمت هر گیگ تانل : {money(d['gb_price'])}\n\n"
+        "🛟پس از خواندن توضیحات ، در صورت تایید ، لطفاً آی پی سرور خود را وارد کنید :\n"
+        "✴️نکته : پورت به صورت رندوم توسط ربات ساخته و ارسال میشود.✴️"
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ تأیید و ادامه", callback_data="buy_confirm")],
+        [InlineKeyboardButton(text="✖️ انصراف", callback_data="cancel_user_flow")]
+    ])
+    await m.answer(description, reply_markup=keyboard, parse_mode="HTML")
+
+@dp.callback_query(F.data == "buy_confirm")
+async def buy_confirm(q: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    if not data.get("server_id") or not data.get("service_label"):
+        await state.clear()
+        return await q.answer("فرایند خرید منقضی شده؛ دوباره شروع کنید.", show_alert=True)
+    await state.set_state(Buy.dest_ip)
+    await edit_or_send(q, "🛟لطفاً آی پی سرور خود را وارد کنید:", reply_markup=flow_cancel_kb())
+    await q.answer()
+
+@dp.message(F.text)
+async def user_reply_menu_router(m: Message, state):
+    if not m.text or is_admin(m.from_user.id):
+        raise SkipHandler
+    if m.text.strip() == "تماس با پشتیبانی💬":
+        await state.clear()
+        await state.set_state(SupportFlow.message)
+        return await m.answer("💬 لطفاً پیام خود را برای پشتیبانی ارسال کنید:", reply_markup=flow_cancel_kb())
+    matched = False
+    for key,default in USER_BUTTONS.items():
+        if m.text.strip() == await setting(f"user_btn_{key}", default):
+            matched = True
+            break
+    if not matched:
+        raise SkipHandler
+    async with db() as c:
+        await c.execute("UPDATE users SET full_name=?, username=? WHERE id=?",
+                        (m.from_user.full_name, m.from_user.username, m.from_user.id))
+        await c.commit()
+    # A menu button always exits any unfinished customer flow.
+    await state.clear()
+    for key,default in USER_BUTTONS.items():
+        if m.text.strip()!=await setting(f"user_btn_{key}",default): continue
+        if key=="buy":
+            async with db() as c: rows=await (await c.execute("SELECT id,name,create_price,gb_price FROM servers WHERE active=1")).fetchall()
+            if not rows: return await m.answer("📭 در حال حاضر پلن فعالی وجود ندارد.",reply_markup=await user_reply_kb())
+            kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=str(r[1]),callback_data=f"choose:{r[0]}")] for r in rows]+[[InlineKeyboardButton(text="✖️ انصراف",callback_data="cancel_user_flow")]])
+            return await m.answer("🛒 <b>انتخاب پنل مقصد</b>\nلطفاً یکی از پنل‌ها را انتخاب کنید:",reply_markup=kb,parse_mode="HTML")
+        if key=="test":
+            async with db() as c:
+                rows = await (await c.execute("""
+                    SELECT s.id,s.name FROM servers s WHERE s.active=1 AND s.test_enabled=1
+                    AND NOT EXISTS(SELECT 1 FROM test_history h WHERE h.user_id=? AND h.server_id=s.id)
+                    ORDER BY s.id
+                """, (m.from_user.id,))).fetchall()
+            if not rows:
+                return await m.answer("🧪 فعلاً سرور تست قابل استفاده‌ای ندارید یا قبلاً تست این سرورها را دریافت کرده‌اید.", reply_markup=await user_reply_kb())
+            kb = [[InlineKeyboardButton(text=f"🌐 {r[1]}", callback_data=f"testchoose:{r[0]}")] for r in rows]
+            kb.append([InlineKeyboardButton(text="✖️ لغو", callback_data="cancel_user_flow")])
+            return await m.answer("🧪 سرور تست رایگان را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+        if key=="topup":
+            await state.set_state(Topup.amount); return await m.answer("💳 مبلغ شارژ را به تومان وارد کنید:",reply_markup=flow_cancel_kb())
+        if key=="balance":
+            await ensure_user(m.from_user.id)
+            async with db() as c: row=await (await c.execute("SELECT balance FROM users WHERE id=?",(m.from_user.id,))).fetchone()
+            return await m.answer(f"💳 <b>موجودی شما</b>\n\n💰 {money(row[0])}",reply_markup=await user_reply_kb(),parse_mode="HTML")
+        if key=="usage":
+            async with db() as c: rows=await (await c.execute("SELECT s.port,s.dest_ip,s.total_bytes,s.enabled,v.name FROM services s JOIN servers v ON v.id=s.server_id WHERE s.user_id=?",(m.from_user.id,))).fetchall()
+            lines=["📊 <b>گزارش مصرف شما</b>"]+[f"• {r[4]} | پورت {r[0]} | {r[1]}\n  مصرف: {r[2]/1024**3:.3f} GB | {'🟢 فعال' if r[3] else '🔴 غیرفعال'}" for r in rows]
+            return await m.answer("\n\n".join(lines),reply_markup=await user_reply_kb(),parse_mode="HTML")
+        if key=="services":
+            async with db() as c: rows=await (await c.execute("SELECT id,name,port,enabled FROM services WHERE user_id=? ORDER BY id DESC",(m.from_user.id,))).fetchall()
+            if not rows: return await m.answer("📭 هنوز سرویسی ندارید.",reply_markup=await user_reply_kb())
+            kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{'🟢' if r[3] else '🔴'} {r[1]} · پورت {r[2]}",callback_data=f"svc:{r[0]}")] for r in rows])
+            return await m.answer("📡 سرویس‌های شما · برای مدیریت انتخاب کنید:",reply_markup=kb)
+
+
+@dp.message(SupportFlow.message)
+async def support_message(m: Message, state: FSMContext):
+    body = (m.text or m.caption or "").strip()
+    if not body:
+        return await m.answer("لطفاً متن پیام خود را ارسال کنید.")
+    try:
+        await m.bot.send_message(
+            ADMIN_ID,
+            "💬 <b>پیام جدید پشتیبانی</b>\n"
+            f"👤 کاربر: {html.escape(m.from_user.full_name)}\n"
+            f"🆔 شناسه: <code>{m.from_user.id}</code>\n\n"
+            f"{html.escape(body)}",
+            parse_mode="HTML"
+        )
+        await state.clear()
+        await m.answer("✅ پیام شما برای پشتیبانی ارسال شد.", reply_markup=await user_reply_kb())
+    except Exception:
+        logging.exception("support message forwarding failed")
+        await m.answer("❌ ارسال پیام انجام نشد. کمی بعد دوباره تلاش کنید.", reply_markup=flow_cancel_kb())
 
 @dp.message(Buy.dest_ip)
 async def get_ip(m:Message,state:FSMContext):
@@ -341,7 +505,7 @@ async def get_ip(m:Message,state:FSMContext):
     try:
         async with Sanaei(server[1], server[2], server[3]) as api:
             port = await choose_free_port(api, d["server_id"])
-            name = f"user_{m.from_user.id}_{port}"
+            name = f"{d.get('service_label', 'Tunnel')} | {port}"
             result = await api.create_tunnel(port, ip, name, server[7])
 
             inbound_id = int(result)
@@ -948,17 +1112,28 @@ async def admin_users(q: CallbackQuery):
     await show_users_page(q, 0)
 
 async def show_users_page(q, page):
-    per_page = 8
+    per_page = 10
     async with db() as c:
         total = (await (await c.execute("SELECT COUNT(*) FROM users")).fetchone())[0]
-        rows = await (await c.execute("SELECT id,balance,blocked FROM users ORDER BY id DESC LIMIT ? OFFSET ?", (per_page, page*per_page))).fetchall()
-    buttons = [[InlineKeyboardButton(text=f"{'⛔️' if b else '🟢'} {uid} · {money(balance)}", callback_data=f"userdetail:{uid}:{page}")] for uid,balance,b in rows]
+        rows = await (await c.execute(
+            "SELECT id,full_name,username FROM users ORDER BY id DESC LIMIT ? OFFSET ?",
+            (per_page, page*per_page)
+        )).fetchall()
+    buttons = []
+    for i in range(0, len(rows), 2):
+        pair = rows[i:i+2]
+        buttons.append([
+            InlineKeyboardButton(
+                text=((f"{r[1] or r[0]} - @{r[2]}" if r[2] else f"{r[1] or r[0]}")[:60]),
+                callback_data=f"userdetail:{r[0]}:{page}"
+            ) for r in pair
+        ])
     nav=[]
-    if page: nav.append(InlineKeyboardButton(text="◀️ قبلی", callback_data=f"userpage:{page-1}"))
-    if (page+1)*per_page < total: nav.append(InlineKeyboardButton(text="بعدی ▶️", callback_data=f"userpage:{page+1}"))
+    if page: nav.append(InlineKeyboardButton(text="صفحه قبل»", callback_data=f"userpage:{page-1}"))
+    if (page+1)*per_page < total: nav.append(InlineKeyboardButton(text="صفحه بعد«", callback_data=f"userpage:{page+1}"))
     if nav: buttons.append(nav)
     buttons.append([InlineKeyboardButton(text="↩️ پنل مدیریت", callback_data="admin_home")])
-    await edit_or_send(q, f"👥 <b>کاربران ربات</b>\nتعداد کل: <b>{total}</b>\n\nبرای مشاهده جزئیات، کاربر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+    await edit_or_send(q, f"👥 <b>کاربران ربات</b>\nتعداد کل: <b>{total}</b>\nصفحه: <b>{page+1}</b>\n\nبرای مشاهده جزئیات، کاربر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
     await q.answer()
 
 @dp.callback_query(F.data.startswith("userpage:"))
@@ -970,6 +1145,7 @@ async def render_user_detail(q, uid, page):
     async with db() as c:
         row=await (await c.execute("SELECT balance,blocked FROM users WHERE id=?",(uid,))).fetchone()
         count=(await (await c.execute("SELECT COUNT(*) FROM services WHERE user_id=?",(uid,))).fetchone())[0]
+        active_count=(await (await c.execute("SELECT COUNT(*) FROM services WHERE user_id=? AND enabled=1",(uid,))).fetchone())[0]
     if not row: return await q.answer("کاربر پیدا نشد.", show_alert=True)
     kb=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔓 رفع مسدودی" if row[1] else "⛔️ مسدود کردن کاربر",callback_data=f"userblock:{uid}:{page}")],
@@ -977,9 +1153,10 @@ async def render_user_detail(q, uid, page):
         [InlineKeyboardButton(text="🧾 مشاهده سفارش‌ها",callback_data=f"userorders:{uid}:{page}")],
         [InlineKeyboardButton(text="➕ افزایش موجودی",callback_data=f"usercredit:{uid}:{page}")],
         [InlineKeyboardButton(text="➖ کاهش موجودی",callback_data=f"userdebit:{uid}:{page}")],
+        [InlineKeyboardButton(text="✉️ ارسال پیام به کاربر",callback_data=f"usersend:{uid}:{page}")],
         [InlineKeyboardButton(text="↩️ بازگشت به کاربران",callback_data=f"userpage:{page}")],
         [InlineKeyboardButton(text="🏠 پنل مدیریت",callback_data="admin_home")]])
-    await edit_or_send(q,f"👤 <b>مدیریت کاربر</b>\nشناسه: <code>{uid}</code>\nوضعیت: {'⛔️ مسدود' if row[1] else '🟢 فعال'}\nموجودی: <b>{money(row[0])}</b>\nتعداد سرویس‌ها: <b>{count}</b>",reply_markup=kb,parse_mode="HTML")
+    await edit_or_send(q,f"👤 <b>مدیریت کاربر</b>\nشناسه: <code>{uid}</code>\nوضعیت: {'⛔️ مسدود' if row[1] else '🟢 فعال'}\nموجودی: <b>{money(row[0])}</b>\nسرویس‌های فعال: <b>{active_count}</b>\nکل سرویس‌ها: <b>{count}</b>",reply_markup=kb,parse_mode="HTML")
 
 @dp.callback_query(F.data.startswith("userdetail:"))
 async def user_detail(q):
@@ -1022,6 +1199,17 @@ async def user_adjust(q,state):
     await state.set_state(AdminFlow.credit_amount if action=="usercredit" else AdminFlow.debit_amount)
     await edit_or_send(q,f"💰 مبلغ {'افزایش' if action=='usercredit' else 'کاهش'} موجودی کاربر <code>{uid}</code> را وارد کنید:",reply_markup=flow_cancel_kb(is_admin_flow=True),parse_mode="HTML"); await q.answer()
 
+@dp.callback_query(F.data.startswith("usersend:"))
+async def user_send_start(q: CallbackQuery, state: FSMContext):
+    if not is_admin(q.from_user.id):
+        return await q.answer("⛔️ دسترسی ندارید.", show_alert=True)
+    _, uid, page = q.data.split(":")
+    await state.update_data(target_user_id=int(uid), user_page=int(page))
+    await state.set_state(AdminFlow.send_user_message)
+    await edit_or_send(q, f"✉️ پیام موردنظر برای کاربر <code>{uid}</code> را ارسال کنید:",
+                       reply_markup=flow_cancel_kb(is_admin_flow=True), parse_mode="HTML")
+    await q.answer()
+
 @dp.callback_query(F.data == "a_userlabels")
 async def user_labels_menu(q):
     if not is_admin(q.from_user.id): return await q.answer("⛔️ دسترسی ندارید.", show_alert=True)
@@ -1043,45 +1231,56 @@ async def edit_label_save(m,state):
     label=(m.text or "").strip()
     if not label or len(label)>50: return await m.answer("❌ عنوان باید بین ۱ تا ۵۰ نویسه باشد.",reply_markup=flow_cancel_kb(is_admin_flow=True))
     data=await state.get_data(); await set_setting(f"user_btn_{data['edit_label_key']}",label); await state.clear()
-    await m.answer("✅ عنوان دکمه ذخیره شد. با /start منوی جدید را دریافت می‌کنید.",reply_markup=admin_kb())
+    await m.answer("✅ عنوان دکمه ذخیره شد. با /start منوی جدید را دریافت می‌کنید.",reply_markup=admin_reply_kb())
 
-@dp.message(StateFilter(None))
-async def user_reply_menu_router(m: Message, state):
-    if not m.text: return
-    for key,default in USER_BUTTONS.items():
-        if m.text.strip()!=await setting(f"user_btn_{key}",default): continue
-        if key=="buy":
-            async with db() as c: rows=await (await c.execute("SELECT id,name,create_price,gb_price FROM servers WHERE active=1")).fetchall()
-            if not rows: return await m.answer("📭 در حال حاضر پلن فعالی وجود ندارد.",reply_markup=await user_reply_kb())
-            kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"🌍 {r[1]} · ساخت {money(r[2])} · هر گیگ {money(r[3])}",callback_data=f"choose:{r[0]}")] for r in rows]+[[InlineKeyboardButton(text="✖️ انصراف",callback_data="cancel_user_flow")]])
-            return await m.answer("🛒 <b>انتخاب پلن</b>\nیکی از پلن‌ها را انتخاب کنید:",reply_markup=kb,parse_mode="HTML")
-        if key=="test":
-            async with db() as c:
-                rows = await (await c.execute("""
-                    SELECT s.id,s.name FROM servers s WHERE s.active=1 AND s.test_enabled=1
-                    AND NOT EXISTS(SELECT 1 FROM test_history h WHERE h.user_id=? AND h.server_id=s.id)
-                    ORDER BY s.id
-                """, (m.from_user.id,))).fetchall()
-            if not rows:
-                return await m.answer("🧪 فعلاً سرور تست قابل استفاده‌ای ندارید یا قبلاً تست این سرورها را دریافت کرده‌اید.", reply_markup=await user_reply_kb())
-            kb = [[InlineKeyboardButton(text=f"🌐 {r[1]}", callback_data=f"testchoose:{r[0]}")] for r in rows]
-            kb.append([InlineKeyboardButton(text="✖️ لغو", callback_data="cancel_user_flow")])
-            return await m.answer("🧪 سرور تست رایگان را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-        if key=="topup":
-            await state.set_state(Topup.amount); return await m.answer("💳 مبلغ شارژ را به تومان وارد کنید:",reply_markup=flow_cancel_kb())
-        if key=="balance":
-            await ensure_user(m.from_user.id)
-            async with db() as c: row=await (await c.execute("SELECT balance FROM users WHERE id=?",(m.from_user.id,))).fetchone()
-            return await m.answer(f"💳 <b>موجودی شما</b>\n\n💰 {money(row[0])}",reply_markup=await user_reply_kb(),parse_mode="HTML")
-        if key=="usage":
-            async with db() as c: rows=await (await c.execute("SELECT s.port,s.dest_ip,s.total_bytes,s.enabled,v.name FROM services s JOIN servers v ON v.id=s.server_id WHERE s.user_id=?",(m.from_user.id,))).fetchall()
-            lines=["📊 <b>گزارش مصرف شما</b>"]+[f"• {r[4]} | پورت {r[0]} | {r[1]}\n  مصرف: {r[2]/1024**3:.3f} GB | {'🟢 فعال' if r[3] else '🔴 غیرفعال'}" for r in rows]
-            return await m.answer("\n\n".join(lines),reply_markup=await user_reply_kb(),parse_mode="HTML")
-        if key=="services":
-            async with db() as c: rows=await (await c.execute("SELECT id,name,port,enabled FROM services WHERE user_id=? ORDER BY id DESC",(m.from_user.id,))).fetchall()
-            if not rows: return await m.answer("📭 هنوز سرویسی ندارید.",reply_markup=await user_reply_kb())
-            kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{'🟢' if r[3] else '🔴'} {r[1]} · پورت {r[2]}",callback_data=f"svc:{r[0]}")] for r in rows])
-            return await m.answer("📡 سرویس‌های شما · برای مدیریت انتخاب کنید:",reply_markup=kb)
+
+@dp.message(StateFilter(None), F.from_user.id == ADMIN_ID)
+async def admin_reply_menu_router(m: Message, state: FSMContext):
+    if m.from_user.id != ADMIN_ID or not m.text:
+        return
+    text = m.text.strip()
+    if text == "🏠 بازگشت به فروشگاه":
+        return await m.answer("🏪 منوی کاربری فعال شد.", reply_markup=await user_reply_kb())
+    if text == "➕ افزودن سرور":
+        await state.set_state(AdminFlow.server_name)
+        return await m.answer("نام سرور/پلن را وارد کنید:", reply_markup=flow_cancel_kb(True))
+    if text == "⚠️ هشدار موجودی":
+        await state.set_state(AdminFlow.set_warning)
+        return await m.answer("حد هشدار موجودی به تومان را وارد کنید:", reply_markup=flow_cancel_kb(True))
+    if text == "➕ شارژ دستی":
+        await state.set_state(AdminFlow.credit_user)
+        return await m.answer("آیدی عددی کاربر را وارد کنید:", reply_markup=flow_cancel_kb(True))
+    if text == "➖ کسر موجودی":
+        await state.set_state(AdminFlow.debit_user)
+        return await m.answer("آیدی عددی کاربر را وارد کنید:", reply_markup=flow_cancel_kb(True))
+    if text == "📡 لیست سرورها":
+        async with db() as c:
+            rows = await (await c.execute("SELECT id,name,url,active,test_enabled FROM servers ORDER BY id DESC")).fetchall()
+        body = ["📡 <b>سرورها</b>"] + [f"#{r[0]} · {r[1]} · {'فعال' if r[3] else 'غیرفعال'} · تست {'روشن' if r[4] else 'خاموش'}" for r in rows]
+        return await m.answer("\n".join(body) if rows else "هنوز سروری ثبت نشده است.", parse_mode="HTML", reply_markup=admin_reply_kb())
+    if text == "💳 روش‌های پرداخت":
+        async with db() as c:
+            rows = await (await c.execute("SELECT id,title,card_number,active FROM payment_methods ORDER BY id")).fetchall()
+        kb = [[InlineKeyboardButton(text=f"{'🟢' if r[3] else '🔴'} {r[1]} · {r[2]}", callback_data=f"paytoggle:{r[0]}"),
+               InlineKeyboardButton(text="🗑", callback_data=f"paydelete:{r[0]}")] for r in rows]
+        kb.append([InlineKeyboardButton(text="➕ افزودن روش پرداخت", callback_data="payadd")])
+        return await m.answer("💳 روش‌های پرداخت:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    if text == "🧾 رسیدهای در انتظار":
+        async with db() as c:
+            rows = await (await c.execute("SELECT id,user_id,amount FROM topups WHERE status='pending' ORDER BY id DESC LIMIT 20")).fetchall()
+        kb = [[InlineKeyboardButton(text=f"#{r[0]} · کاربر {r[1]} · {money(r[2])}", callback_data=f"topup_view:{r[0]}")] for r in rows]
+        return await m.answer("🧾 رسیدهای در انتظار:" if rows else "رسید در انتظاری وجود ندارد.", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb) if rows else admin_reply_kb())
+    if text == "👥 کاربران ربات":
+        async with db() as c:
+            rows = await (await c.execute("SELECT id,balance,blocked FROM users ORDER BY id DESC LIMIT 20")).fetchall()
+        body = ["👥 <b>آخرین کاربران</b>"] + [f"🆔 <code>{r[0]}</code> · {money(r[1])} · {'مسدود' if r[2] else 'فعال'}" for r in rows]
+        return await m.answer("\n".join(body) if rows else "هنوز کاربری ثبت نشده است.", parse_mode="HTML", reply_markup=admin_reply_kb())
+    if text == "🎨 ویرایش دکمه‌های کاربر":
+        kb = [[InlineKeyboardButton(text=label, callback_data=f"editlabel:{key}")] for key,label in USER_BUTTONS.items()]
+        return await m.answer("🎨 دکمه موردنظر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+
+
 
 
 @dp.callback_query(F.data == "a_payments")
@@ -1129,7 +1328,7 @@ async def pay_owner(m: Message, state: FSMContext):
                         (d["pay_title"], d["pay_card"], owner))
         await c.commit()
     await state.clear()
-    await m.answer("✅ روش پرداخت اضافه شد.", reply_markup=admin_kb())
+    await m.answer("✅ روش پرداخت اضافه شد.", reply_markup=admin_reply_kb())
 
 @dp.callback_query(F.data.startswith("paytoggle:"))
 async def pay_toggle(q: CallbackQuery):
@@ -1172,7 +1371,7 @@ async def test_entry(q: CallbackQuery, state: FSMContext):
             ORDER BY s.id
         """, (q.from_user.id,))).fetchall()
     if not rows:
-        await edit_or_send(q, "🧪 در حال حاضر سرور تست قابل استفاده‌ای ندارید؛ یا قبلاً از تست این سرورها استفاده کرده‌اید.", reply_markup=main_kb())
+        await edit_or_send(q, "🧪 فعلاً سرور تست قابل استفاده‌ای ندارید یا قبلاً تست این سرور را دریافت کرده‌اید.", reply_markup=main_kb())
     else:
         kb = [[InlineKeyboardButton(text=f"🌐 {r[1]}", callback_data=f"testchoose:{r[0]}")] for r in rows]
         kb.append([InlineKeyboardButton(text="✖️ لغو", callback_data="cancel_user_flow")])
@@ -1187,7 +1386,7 @@ async def test_choose(q: CallbackQuery, state: FSMContext):
     if not row: return await q.answer("این سرور تست در دسترس نیست.", show_alert=True)
     await state.update_data(test_server_id=sid)
     await state.set_state(TestFlow.dest_ip)
-    await edit_or_send(q, "🌍 IP مقصد را وارد کنید؛ پورت به‌صورت خودکار انتخاب می‌شود. حجم تست: ۲ گیگابایت.", reply_markup=flow_cancel_kb())
+    await edit_or_send(q, "🛟برای دریافت تانل تست لطفاً آی پی سرور خود را وارد نمایید:", reply_markup=flow_cancel_kb())
     await q.answer()
 
 @dp.message(TestFlow.dest_ip)
@@ -1203,7 +1402,7 @@ async def create_free_test(m: Message, state: FSMContext):
         return await m.answer("سرور تست یا اینباند نمونه در دسترس نیست.")
     if used:
         await state.clear()
-        return await m.answer("شما قبلاً از تست این سرور استفاده کرده‌اید.")
+        return await m.answer("🧪 فعلاً سرور تست قابل استفاده‌ای ندارید یا قبلاً تست این سرور را دریافت کرده‌اید.", reply_markup=await user_reply_kb())
     port = None
     try:
         async with Sanaei(server[1],server[2],server[3]) as api:
@@ -1216,9 +1415,19 @@ async def create_free_test(m: Message, state: FSMContext):
                             (m.from_user.id,d["test_server_id"],int(inbound_id),port,ip,datetime.utcnow().isoformat()))
             await c.commit()
         await state.clear()
-        await m.answer(f"✅ تست رایگان ساخته شد.\\nسرور: {server[0]}\\nIP مقصد: {ip}\\nپورت: <code>{port}</code>\\nحجم مجاز: ۲ گیگابایت", parse_mode="HTML", reply_markup=await user_reply_kb())
-        try: await m.bot.send_message(ADMIN_ID, f"🧪 تست رایگان ساخته شد\\nکاربر: <code>{m.from_user.id}</code>\\nسرور: {server[0]}\\nپورت: {port}", parse_mode="HTML")
-        except Exception: pass
+        await m.answer(
+            "تست تانل شما با موفقیت ساخته شد✅\n"
+            "➖➖➖➖➖➖➖➖\n"
+            f"🗯️پورت تانل : <code>{port}</code>\n"
+            f"🏳️ آی پی مقصد : <code>{html.escape(ip)}</code>\n"
+            "🔋حجم تست : <code>2</code> گیگابایت\n"
+            "⏳فعال تا اتمام حجم\n"
+            f"⚜️آی پی اتصال تانل : <code>{html.escape(str(server[4] or 'ثبت نشده'))}</code>\n\n"
+            "🔴نحوه اتصال : برای آی‌پی دریافت‌شده از ربات یک ساب‌دامنه تعریف کرده "
+            "و سپس آن را به‌همراه پورت دریافتی در اطلاعات هاست کانفیگ خود قرار دهید و تست کنید.",
+            parse_mode="HTML",
+            reply_markup=await user_reply_kb()
+        )
     except Exception as exc:
         logging.exception("free test creation failed")
         await state.clear()
@@ -1445,21 +1654,40 @@ async def sgp(m:Message,state:FSMContext):
     async with db() as c:
         await c.execute("INSERT INTO servers(name,url,username,password,delivery_ip,create_price,gb_price) VALUES(?,?,?,?,?,?,?)",(d["name"],d["url"],d["username"],d["password"],d["delivery_ip"],d["create_price"],int(m.text)))
         await c.commit()
-    await state.clear(); await m.answer("✅ سرور اضافه شد.",reply_markup=admin_kb())
+    await state.clear(); await m.answer("✅ سرور اضافه شد.",reply_markup=admin_reply_kb())
 
 async def numeric_setting(m,state,key):
     if not m.text or not m.text.isdigit(): return await m.answer("فقط عدد وارد کنید.", reply_markup=flow_cancel_kb(is_admin_flow=True))
-    await set_setting(key,m.text); await state.clear(); await m.answer("✅ ذخیره شد.",reply_markup=admin_kb())
+    await set_setting(key,m.text); await state.clear(); await m.answer("✅ ذخیره شد.",reply_markup=admin_reply_kb())
 @dp.message(AdminFlow.set_card)
-async def setcard(m,state): await set_setting("card",m.text.strip()); await state.clear(); await m.answer("✅ شماره کارت ذخیره شد.", reply_markup=admin_kb())
+async def setcard(m,state): await set_setting("card",m.text.strip()); await state.clear(); await m.answer("✅ شماره کارت ذخیره شد.", reply_markup=admin_reply_kb())
 @dp.message(AdminFlow.set_owner)
-async def setowner(m,state): await set_setting("owner",m.text.strip()); await state.clear(); await m.answer("✅ نام صاحب کارت ذخیره شد.", reply_markup=admin_kb())
+async def setowner(m,state): await set_setting("owner",m.text.strip()); await state.clear(); await m.answer("✅ نام صاحب کارت ذخیره شد.", reply_markup=admin_reply_kb())
 @dp.message(AdminFlow.set_warning)
 async def setwarn(m,state): await numeric_setting(m,state,"warning")
 @dp.message(AdminFlow.set_create_price)
 async def setcp(m,state): await numeric_setting(m,state,"create_price")
 @dp.message(AdminFlow.set_gb_price)
 async def setgp(m,state): await numeric_setting(m,state,"gb_price")
+
+@dp.message(AdminFlow.send_user_message)
+async def send_user_message(m: Message, state: FSMContext):
+    data = await state.get_data()
+    uid = int(data["target_user_id"])
+    try:
+        if m.text:
+            await m.bot.send_message(uid, m.text)
+        elif m.photo:
+            await m.bot.send_photo(uid, m.photo[-1].file_id, caption=m.caption or "")
+        elif m.document:
+            await m.bot.send_document(uid, m.document.file_id, caption=m.caption or "")
+        else:
+            return await m.answer("لطفاً متن، عکس یا فایل ارسال کنید.")
+        await m.answer("✅ پیام برای کاربر ارسال شد.", reply_markup=admin_reply_kb())
+    except Exception:
+        logging.exception("admin message to user failed")
+        await m.answer("❌ ارسال پیام ناموفق بود؛ ممکن است کاربر ربات را مسدود کرده باشد.", reply_markup=admin_reply_kb())
+    await state.clear()
 
 @dp.message(AdminFlow.credit_user)
 async def credituser(m,state):
@@ -1472,7 +1700,7 @@ async def creditamount(m,state):
     async with db() as c:
         await c.execute("UPDATE users SET balance=balance+?,warned=0 WHERE id=?",(amount,uid))
         await c.execute("INSERT INTO ledger(user_id,amount,reason,created_at) VALUES(?,?,?,?)",(uid,amount,"شارژ دستی",datetime.utcnow().isoformat())); await c.commit()
-    await state.clear(); await m.answer("✅ شارژ انجام شد.", reply_markup=admin_kb())
+    await state.clear(); await m.answer("✅ شارژ انجام شد.", reply_markup=admin_reply_kb())
     try: await m.bot.send_message(uid,f"حساب شما به مبلغ {money(amount)} شارژ شد.")
     except: pass
 @dp.message(AdminFlow.debit_user)
@@ -1486,7 +1714,7 @@ async def debitamount(m,state):
     async with db() as c:
         await c.execute("UPDATE users SET balance=MAX(0,balance-?) WHERE id=?",(amount,uid))
         await c.execute("INSERT INTO ledger(user_id,amount,reason,created_at) VALUES(?,?,?,?)",(uid,-amount,"کسر دستی",datetime.utcnow().isoformat())); await c.commit()
-    await state.clear(); await m.answer("✅ کسر موجودی انجام شد.", reply_markup=admin_kb())
+    await state.clear(); await m.answer("✅ کسر موجودی انجام شد.", reply_markup=admin_reply_kb())
 
 async def usage_worker(bot):
     while True:
@@ -1595,6 +1823,9 @@ async def test_usage_worker(bot):
         except Exception:
             logging.exception("test usage worker error")
         await asyncio.sleep(max(1,USAGE_CHECK_MINUTES)*60)
+
+
+
 
 async def main():
     if BOT_TOKEN.startswith("PASTE_") or ADMIN_ID==123456789:
