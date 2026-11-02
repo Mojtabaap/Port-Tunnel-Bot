@@ -1,4 +1,59 @@
 #!/usr/bin/env bash
+# دریافت خودکار آخرین نسخه پروژه از GitHub
+set -Eeuo pipefail
+
+INSTALL_DIR="/opt/Port-Tunnel-Bot"
+REPO_URL="https://github.com/Mojtabaap/Port-Tunnel-Bot/archive/refs/heads/main.tar.gz"
+
+download_project() {
+    echo "در حال دریافت آخرین نسخه پروژه از GitHub..."
+
+    mkdir -p "$INSTALL_DIR"
+
+    local TMP_DIR
+    TMP_DIR=$(mktemp -d)
+
+    trap 'rm -rf "$TMP_DIR"' RETURN
+
+    if ! curl -fLsS "$REPO_URL" -o "$TMP_DIR/project.tar.gz"; then
+        echo "خطا در دریافت پروژه از GitHub."
+        return 1
+    fi
+
+    mkdir -p "$TMP_DIR/source"
+
+    if ! tar -xzf "$TMP_DIR/project.tar.gz" \
+        --strip-components=1 \
+        -C "$TMP_DIR/source"; then
+        echo "فایل دریافتی معتبر نیست."
+        return 1
+    fi
+
+    # حفظ اطلاعات محرمانه و داده‌های قبلی
+    tar -czf "$TMP_DIR/project-files.tar.gz" \
+        --exclude='./config.py' \
+        --exclude='./bot.sqlite3' \
+        --exclude='./bot.sqlite3-*' \
+        --exclude='./*.sqlite3' \
+        --exclude='./*.db' \
+        --exclude='./venv' \
+        --exclude='./backups' \
+        -C "$TMP_DIR/source" .
+
+    tar -xzf "$TMP_DIR/project-files.tar.gz" -C "$INSTALL_DIR"
+
+    echo "فایل‌های پروژه دریافت شدند."
+}
+
+if [[ $EUID -ne 0 ]]; then
+    echo "نصب‌کننده باید با دسترسی root اجرا شود."
+    exit 1
+fi
+
+apt-get update
+apt-get install -y curl tar
+
+download_project
 
 set -Eeuo pipefail
 
