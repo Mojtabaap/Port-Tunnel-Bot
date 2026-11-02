@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# دریافت خودکار آخرین نسخه پروژه از GitHub
+# Download the latest project release from GitHub
 set -Eeuo pipefail
 
 INSTALL_DIR="/opt/Port-Tunnel-Bot"
 REPO_URL="https://github.com/Mojtabaap/Port-Tunnel-Bot/archive/refs/heads/main.tar.gz"
 
 download_project() {
-    echo "در حال دریافت آخرین نسخه پروژه از GitHub..."
+    echo "[INFO] Downloading the latest project from GitHub..."
 
     mkdir -p "$INSTALL_DIR"
 
@@ -16,7 +16,7 @@ download_project() {
     trap 'rm -rf "$TMP_DIR"' RETURN
 
     if ! curl -fLsS "$REPO_URL" -o "$TMP_DIR/project.tar.gz"; then
-        echo "خطا در دریافت پروژه از GitHub."
+        echo "[ERROR] Failed to download the project from GitHub." >&2
         return 1
     fi
 
@@ -25,11 +25,11 @@ download_project() {
     if ! tar -xzf "$TMP_DIR/project.tar.gz" \
         --strip-components=1 \
         -C "$TMP_DIR/source"; then
-        echo "فایل دریافتی معتبر نیست."
+        echo "[ERROR] The downloaded archive is invalid." >&2
         return 1
     fi
 
-    # حفظ اطلاعات محرمانه و داده‌های قبلی
+    # Preserve existing credentials and user data
     tar -czf "$TMP_DIR/project-files.tar.gz" \
         --exclude='./config.py' \
         --exclude='./bot.sqlite3' \
@@ -42,11 +42,11 @@ download_project() {
 
     tar -xzf "$TMP_DIR/project-files.tar.gz" -C "$INSTALL_DIR"
 
-    echo "فایل‌های پروژه دریافت شدند."
+    echo "[OK] Project files downloaded successfully."
 }
 
 if [[ $EUID -ne 0 ]]; then
-    echo "نصب‌کننده باید با دسترسی root اجرا شود."
+    echo "[ERROR] Please run the installer as root." >&2
     exit 1
 fi
 
@@ -64,51 +64,67 @@ PYTHON="/usr/bin/python3"
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+WHITE='\033[1;37m'
+DIM='\033[2m'
+BOLD='\033[1m'
 NC='\033[0m'
 
-error() {
-    echo -e "${RED}خطا: $1${NC}"
-}
+info()    { echo -e "${CYAN}[*]${NC} $1"; }
+success() { echo -e "${GREEN}[OK]${NC} $1"; }
+warning() { echo -e "${YELLOW}[!]${NC} $1"; }
+error()   { echo -e "${RED}[ERROR]${NC} $1" >&2; }
 
-success() {
-    echo -e "${GREEN}$1${NC}"
+line() { printf '%b\n' "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; }
+
+banner() {
+    clear 2>/dev/null || true
+    echo -e "${CYAN}${BOLD}"
+    echo '  +------------------------------------------------------+ '
+    echo '  |              PORT TUNNEL BOT INSTALLER               |'
+    echo '  +------------------------------------------------------+ '
+    echo -e "${NC}${WHITE}${BOLD}                 SERVER MANAGEMENT MENU${NC}"
+    echo -e "${DIM}                 Linux Deployment Utility${NC}"
+    line
 }
 
 pause() {
     echo
-    read -rp "برای ادامه Enter بزنید..."
+    read -rp "$(echo -e "${DIM}Press ENTER to return to the menu...${NC}")"
 }
 
 install_bot() {
     echo
-    echo "======================================"
-    echo "          نصب ربات فروش"
-    echo "======================================"
+    line
+    echo -e "${WHITE}${BOLD}  BOT INSTALLATION${NC}"
+    line
 
     if [[ $EUID -ne 0 ]]; then
-        error "نصب‌کننده باید با دسترسی root اجرا شود."
+        error "Please run the installer as root."
         return 1
     fi
 
     if [[ ! -f "$INSTALL_DIR/bot.py" ]]; then
-        error "فایل bot.py پیدا نشد."
+        error "bot.py was not found."
         return 1
     fi
 
     if [[ ! -f "$INSTALL_DIR/requirements.txt" ]]; then
-        error "فایل requirements.txt پیدا نشد."
+        error "requirements.txt was not found."
         return 1
     fi
 
     if systemctl is-active --quiet sanaei-tunnel-bot; then
-        error "سرویس قدیمی sanaei-tunnel-bot فعال است."
-        echo "برای جلوگیری از اجرای هم‌زمان دو ربات، نصب متوقف شد."
-        echo "سرویس فعلی بدون تغییر باقی ماند."
+        error "Legacy service sanaei-tunnel-bot is active."
+        warning "Installation stopped to prevent duplicate bot processes."
+        info "The existing service has not been changed."
         return 1
     fi
 
     echo
-    echo "در حال بررسی پیش‌نیازها..."
+    info "Checking system requirements..."
 
     apt-get update
     apt-get install -y python3 python3-venv python3-pip
@@ -118,7 +134,7 @@ install_bot() {
     fi
 
     echo
-    echo "در حال نصب وابستگی‌ها..."
+    info "Installing Python dependencies..."
 
     "$INSTALL_DIR/venv/bin/pip" install --upgrade pip
     "$INSTALL_DIR/venv/bin/pip" install \
@@ -127,20 +143,20 @@ install_bot() {
     if [[ ! -f "$INSTALL_DIR/config.py" ]]; then
 
         echo
-        echo "اطلاعات ربات را وارد کنید."
+        info "Enter your Telegram bot configuration."
 
-        read -rsp "توکن ربات تلگرام: " BOT_TOKEN
+        read -rsp "Telegram Bot Token: " BOT_TOKEN
         echo
 
         if [[ ! "$BOT_TOKEN" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]]; then
-            error "فرمت توکن معتبر نیست."
+            error "Invalid Telegram bot token format."
             return 1
         fi
 
-        read -rp "آیدی عددی مدیر: " ADMIN_ID
+        read -rp "Admin User ID: " ADMIN_ID
 
         if [[ ! "$ADMIN_ID" =~ ^[0-9]+$ ]] || [[ "$ADMIN_ID" == "0" ]]; then
-            error "آیدی مدیر باید یک عدد معتبر باشد."
+            error "Admin ID must be a valid positive number."
             return 1
         fi
 
@@ -176,12 +192,11 @@ PY
 
     else
         echo
-        success "فایل config.py از قبل وجود دارد."
-        echo "تنظیمات قبلی حفظ می‌شوند."
+        success "Existing config.py found. Keeping current settings."
     fi
 
     echo
-    echo "در حال بررسی دیتابیس..."
+    info "Initializing the database..."
 
     cd "$INSTALL_DIR"
 
@@ -189,7 +204,7 @@ PY
         'import asyncio; from bot import init_db; asyncio.run(init_db())'
 
     echo
-    echo "در حال ساخت سرویس systemd..."
+    info "Creating the systemd service..."
 
     cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<UNIT
 [Unit]
@@ -217,30 +232,26 @@ UNIT
     systemctl restart "$SERVICE_NAME"
 
     echo
-    success "مراحل نصب به پایان رسید."
+    success "Bot installation completed successfully."
 
     systemctl --no-pager --full status "$SERVICE_NAME" || true
 }
 
 show_menu() {
-    clear
-    echo "======================================"
-    echo "       PORT TUNNEL BOT INSTALLER"
-    echo "======================================"
+    banner
+    echo -e "  ${GREEN}1${NC}  Install / Repair Bot"
+    echo -e "  ${GREEN}2${NC}  Install / Configure Telegram Backups"
+    echo -e "  ${GREEN}3${NC}  View Backup Status"
+    echo -e "  ${GREEN}4${NC}  Disable Automatic Backups"
+    echo -e "  ${GREEN}5${NC}  Uninstall Backuper ${DIM}(keep backup archives)${NC}"
+    echo -e "  ${RED}0${NC}  Exit"
     echo
-    echo "  1) نصب ربات فروش"
-    echo "  2) نصب / تنظیم بکاپر تلگرام"
-    echo "  3) وضعیت بکاپر"
-    echo "  4) غیرفعال‌سازی بکاپر"
-    echo "  5) حذف بکاپر (حفظ فایل‌های بکاپ)"
-    echo "  0) خروج"
-    echo
-    echo "======================================"
+    line
 }
 
 while true; do
     show_menu
-    read -rp "انتخاب شما: " choice
+    read -rp "Select an option [0-5]: " choice
 
     case "$choice" in
         1)
@@ -264,11 +275,11 @@ while true; do
             pause
             ;;
         0)
-            echo "خروج از نصب‌کننده."
+            success "Exiting installer. Goodbye!"
             exit 0
             ;;
         *)
-            error "انتخاب نامعتبر است."
+            error "Invalid selection. Please choose 0-5."
             sleep 2
             ;;
     esac

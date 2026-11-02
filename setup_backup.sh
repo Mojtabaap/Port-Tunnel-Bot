@@ -14,29 +14,46 @@ BACKUP_DIR="/var/backups/port-tunnel-bot"
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BLUE='\033[0;34m'
+WHITE='\033[1;37m'
+DIM='\033[2m'
+BOLD='\033[1m'
 NC='\033[0m'
 
-error() { echo -e "${RED}$1${NC}" >&2; }
-success() { echo -e "${GREEN}$1${NC}"; }
+error()   { echo -e "${RED}[ERROR]${NC} $1" >&2; }
+success() { echo -e "${GREEN}[OK]${NC} $1"; }
+info()    { echo -e "${CYAN}[*]${NC} $1"; }
+warning() { echo -e "${YELLOW}[!]${NC} $1"; }
+line()    { printf '%b\n' "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; }
+
+backup_banner() {
+    echo -e "${CYAN}${BOLD}"
+    echo '  ╔══════════════════════════════════════════════════════╗'
+    echo '  ║             PORT TUNNEL  |  BACKUP MANAGER           ║'
+    echo '  ╚══════════════════════════════════════════════════════╝'
+    echo -e "${NC}${DIM}          Secure SQLite snapshots | Telegram delivery${NC}"
+    line
+}
 
 require_root() {
     if [[ "$EUID" -ne 0 ]]; then
-        error "این عملیات باید با دسترسی root اجرا شود."
+        error "Please run this operation as root."
         exit 1
     fi
 }
 
 status_backup() {
-    echo "========== وضعیت بکاپر =========="
+    echo "========== BACKUP STATUS =========="
     if [[ -f "$CRON_FILE" ]]; then
-        success "زمان‌بندی بکاپ فعال است."
-        echo "تنظیم Cron:"
+        success "Automatic backups are enabled."
+        echo "Cron configuration:"
         grep -vE '^(SHELL|PATH)=' "$CRON_FILE" || true
     else
-        echo "زمان‌بندی بکاپ غیرفعال است."
+        echo "Automatic backups are disabled."
     fi
     if [[ -f "$CONFIG" ]]; then
-        echo "فایل تنظیمات: موجود (محرمانه)"
+        echo "Configuration file: present (credentials hidden)"
         if [[ -x "$PYTHON" ]]; then
             "$PYTHON" - "$CONFIG" <<'PY'
 import sys
@@ -45,37 +62,37 @@ for line in open(sys.argv[1], encoding="utf-8"):
     if "=" in line and not line.lstrip().startswith("#"):
         k, v = line.rstrip().split("=", 1)
         values[k] = v
-print("فاصله بکاپ:", values.get("BACKUP_INTERVAL_MINUTES", "نامشخص"), "دقیقه")
-print("مسیر دیتابیس:", values.get("DATABASE_PATH", "پیش‌فرض"))
+print("Backup interval:", values.get("BACKUP_INTERVAL_MINUTES", "unknown"), "minutes")
+print("Database path:", values.get("DATABASE_PATH", "default"))
 PY
         fi
     else
-        echo "فایل تنظیمات وجود ندارد."
+        echo "Configuration file not found."
     fi
-    echo "گزارش: $LOG"
+    echo "Log file: $LOG"
 }
 
 disable_backup() {
     rm -f "$CRON_FILE"
-    success "زمان‌بندی بکاپ غیرفعال شد. تنظیمات و فایل‌های بکاپ حفظ شدند."
+    success "Automatic backups disabled. Settings and existing archives were preserved."
 }
 
 uninstall_backup() {
     rm -f "$CRON_FILE"
     rm -f "$CONFIG"
     rm -rf "$STATE_DIR"
-    success "بکاپر حذف شد. فایل‌های بکاپ قبلی در $BACKUP_DIR حفظ شدند."
+    success "Backuper removed. Existing backup archives are preserved in $BACKUP_DIR."
 }
 
 install_backup() {
-    echo "=========================================="
-    echo "       PORT TUNNEL - TELEGRAM BACKUP      "
-    echo "=========================================="
+    backup_banner
+    echo -e "${WHITE}${BOLD}  BACKUP SETUP WIZARD${NC}"
+    line
 
-    [[ -f "$BACKUP" ]] || { error "backup.py پیدا نشد: $BACKUP"; return 1; }
-    [[ -x "$PYTHON" ]] || { error "محیط مجازی پایتون پیدا نشد. ابتدا ربات را نصب کنید."; return 1; }
+    [[ -f "$BACKUP" ]] || { error "backup.py not found: $BACKUP"; return 1; }
+    [[ -x "$PYTHON" ]] || { error "Python virtual environment not found. Install the bot first."; return 1; }
     if ! command -v cron >/dev/null 2>&1; then
-        echo "در حال نصب سرویس Cron..."
+        echo "Installing the Cron service..."
         apt-get update
         apt-get install -y cron
     fi
@@ -84,38 +101,38 @@ install_backup() {
     elif command -v service >/dev/null 2>&1; then
         service cron start >/dev/null 2>&1 || true
     fi
-    [[ -f "$DATABASE" ]] || { error "دیتابیس پیدا نشد. ابتدا ربات را نصب و اجرا کنید."; return 1; }
+    [[ -f "$DATABASE" ]] || { error "Database not found. Install and start the bot first."; return 1; }
     "$PYTHON" -c 'import aiohttp' >/dev/null 2>&1 || {
-        error "کتابخانه aiohttp در محیط پروژه نصب نیست."; return 1;
+        error "The aiohttp package is missing from the project environment."; return 1;
     }
 
     echo
-    read -rsp "توکن ربات اختصاصی بکاپر: " BOT_TOKEN
+    read -rsp "Dedicated Backup Bot Token: " BOT_TOKEN
     echo
     if [[ ! "$BOT_TOKEN" =~ ^[0-9]+:[A-Za-z0-9_-]{20,}$ ]]; then
-        error "فرمت توکن معتبر به نظر نمی‌رسد."
+        error "The token format does not look valid."
         unset BOT_TOKEN
         return 1
     fi
 
-    read -rp "Chat ID مقصد (عدد یا @username کانال): " CHAT_ID
+    read -rp "Destination Chat ID (numeric ID or @channel_username): " CHAT_ID
     if [[ ! "$CHAT_ID" =~ ^-?[0-9]+$ && ! "$CHAT_ID" =~ ^@[A-Za-z0-9_]{5,}$ ]]; then
-        error "Chat ID باید عددی یا به شکل @username باشد."
+        error "Chat ID must be numeric or formatted as @channel_username."
         unset BOT_TOKEN CHAT_ID
         return 1
     fi
 
     echo
-    read -rp "هر چند دقیقه یک بار بکاپ ارسال شود؟ [30]: " INTERVAL
+    read -rp "Backup interval in minutes [30]: " INTERVAL
     INTERVAL="${INTERVAL:-30}"
     if [[ ! "$INTERVAL" =~ ^[0-9]+$ ]] || (( INTERVAL < 1 || INTERVAL > 525600 )); then
-        error "فاصله زمانی باید عددی بین 1 تا 525600 دقیقه باشد."
+        error "Interval must be a number between 1 and 525600 minutes."
         unset BOT_TOKEN CHAT_ID INTERVAL
         return 1
     fi
 
     echo
-    echo "در حال اعتبارسنجی توکن ربات در تلگرام..."
+    echo "Validating the bot token with Telegram..."
     export BACKUP_BOT_TOKEN="$BOT_TOKEN"
     if ! "$PYTHON" - <<'PY'
 import asyncio, os, aiohttp, sys
@@ -127,13 +144,13 @@ async def main():
             async with session.get(url) as response:
                 data = await response.json(content_type=None)
                 if response.status != 200 or not data.get("ok"):
-                    print("توکن توسط تلگرام تأیید نشد:", data.get("description", response.status))
+                    print("Telegram rejected the token:", data.get("description", response.status))
                     return 1
                 bot = data["result"]
-                print(f"توکن معتبر است: @{bot.get('username', 'unknown')}")
+                print(f"Token verified: @{bot.get('username', 'unknown')}")
                 return 0
     except Exception as exc:
-        print("ارتباط با تلگرام ناموفق بود:", exc)
+        print("Could not connect to Telegram:", exc)
         return 1
 sys.exit(asyncio.run(main()))
 PY
@@ -176,16 +193,16 @@ PY
     unset BOT_TOKEN CHAT_ID INTERVAL BACKUP_BOT_TOKEN BACKUP_CHAT_ID BACKUP_INTERVAL_MINUTES BACKUP_DATABASE_PATH
 
     echo
-    echo "در حال گرفتن و ارسال بکاپ آزمایشی..."
+    echo "Creating and sending a test backup..."
     if ! "$PYTHON" "$BACKUP" --scheduled --force; then
-        error "ارسال بکاپ آزمایشی ناموفق بود؛ زمان‌بندی فعال نشد."
+        error "Test backup delivery failed. Scheduling was not enabled."
         if [[ -n "$OLD_CONFIG" ]]; then
             cp -p "$OLD_CONFIG" "$CONFIG"
             rm -f "$OLD_CONFIG"
         else
             rm -f "$CONFIG"
         fi
-        echo "گزارش خطا: $LOG"
+        echo "Error log: $LOG"
         return 1
     fi
     [[ -n "$OLD_CONFIG" ]] && rm -f "$OLD_CONFIG"
@@ -202,11 +219,11 @@ CRON
     chmod 644 "$CRON_TMP"
     mv "$CRON_TMP" "$CRON_FILE"
 
-    success "بکاپر با موفقیت فعال شد و بکاپ آزمایشی ارسال شد."
-    echo "فاصله تنظیم‌شده: هر $CONFIGURED_INTERVAL دقیقه"
-    echo "Cron هر دقیقه بررسی می‌کند و بکاپ فقط پس از گذشت فاصله تعیین‌شده اجرا می‌شود."
-    echo "گزارش: $LOG"
-    echo "تنظیمات محرمانه: $CONFIG (دسترسی فقط root)"
+    success "Backuper enabled successfully. Test backup delivered."
+    echo "Configured interval: every $CONFIGURED_INTERVAL minutes"
+    echo "Cron checks every minute; a backup runs only after the configured interval has elapsed."
+    echo "Log file: $LOG"
+    echo "Private configuration: $CONFIG (root access only)"
 }
 
 require_root
