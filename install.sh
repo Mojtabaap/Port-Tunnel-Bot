@@ -229,7 +229,10 @@ show_menu() {
     echo "======================================"
     echo
     echo "  1) نصب ربات فروش"
-    echo "  2) فعال‌سازی بکاپ دیتابیس تلگرام"
+    echo "  2) نصب / تنظیم بکاپر تلگرام"
+    echo "  3) وضعیت بکاپر"
+    echo "  4) غیرفعال‌سازی بکاپر"
+    echo "  5) حذف بکاپر (حفظ فایل‌های بکاپ)"
     echo "  0) خروج"
     echo
     echo "======================================"
@@ -245,11 +248,21 @@ while true; do
             pause
             ;;
         2)
-    echo
-    echo "Starting Telegram backup setup..."
-    bash /opt/Port-Tunnel-Bot/setup_backup.sh
-    pause
-    ;;
+            bash /opt/Port-Tunnel-Bot/setup_backup.sh install
+            pause
+            ;;
+        3)
+            bash /opt/Port-Tunnel-Bot/setup_backup.sh status
+            pause
+            ;;
+        4)
+            bash /opt/Port-Tunnel-Bot/setup_backup.sh disable
+            pause
+            ;;
+        5)
+            bash /opt/Port-Tunnel-Bot/setup_backup.sh uninstall
+            pause
+            ;;
         0)
             echo "خروج از نصب‌کننده."
             exit 0
